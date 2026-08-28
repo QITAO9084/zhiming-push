@@ -25,6 +25,46 @@ webpush.setVapidDetails(CONTACT, VAPID_PUBLIC, VAPID_PRIVATE);
 const app = express();
 app.use(express.json());
 
+/* ===== 安全防护：内存限流（IP 维度）+ Origin 校验 ===== */
+const rateMap = {};   // { ip: { count, reset } }
+function getClientIp(req){
+  try{
+    var xf = req.headers['x-forwarded-for'];
+    if(xf) return String(xf).split(',')[0].trim();
+  }catch(e){}
+  return req.ip || (req.socket && req.socket.remoteAddress) || 'unknown';
+}
+function rateLimit(limit, windowMs){
+  return function(req, res, next){
+    var ip = getClientIp(req);
+    var now = Date.now();
+    var rec = rateMap[ip];
+    if(rec && now < rec.reset){
+      rec.count++;
+      if(rec.count > limit){
+        return res.status(429).json({ ok:false, err:'请求过于频繁，请稍后再试' });
+      }
+    } else {
+      rateMap[ip] = { count:1, reset: now + windowMs };
+    }
+    next();
+  };
+}
+/* 定期清理限流记录，防内存膨胀（Render 免费层重启会清空，此清理是兜底） */
+setInterval(function(){
+  var now = Date.now();
+  for(var k in rateMap){ if(rateMap[k].reset < now) delete rateMap[k]; }
+}, 10 * 60 * 1000);
+/* Origin 校验：只允许本站前端调用（浏览器跨域本就会拦，此校验防非浏览器直接 POST） */
+function checkOrigin(req, res, next){
+  var origin = req.headers.origin;
+  if(origin && origin !== 'https://zhiming.qtapi.space' && origin !== 'https://zhiming-1oy.pages.dev'){
+    return res.status(403).json({ ok:false, err:'forbidden origin' });
+  }
+  next();
+}
+app.use(checkOrigin);
+
 function loadSubs(){
   try{ const a = JSON.parse(fs.readFileSync(SUB_FILE, 'utf8')); return Array.isArray(a) ? a : []; }
   catch(e){ return []; }
@@ -33,7 +73,7 @@ function saveSubs(subs){
   try{ fs.writeFileSync(SUB_FILE, JSON.stringify(subs, null, 2)); }catch(e){}
 }
 
-app.post('/subscribe', function(req, res){
+app.post('/subscribe', rateLimit(10, 60*1000), function(req, res){
   const sub = req.body && req.body.subscription;
   if(!sub || !sub.endpoint){ return res.json({ ok:false, err:'invalid subscription' }); }
   const profile = (req.body && req.body.profile) || null;
@@ -56,7 +96,7 @@ app.post('/unsubscribe', function(req, res){
 app.get('/', function(req, res){ res.send('知命推送服务运行中，订阅数：' + loadSubs().length); });
 
 /* 手动触发推送（供外部 cron 定时调用，解决 Render 免费层 idle 后 setInterval 不跑的问题） */
-app.get('/push', function(req, res){
+app.get('/push', rateLimit(30, 60*1000), function(req, res){
   pushNow();
   res.json({ ok:true, count: loadSubs().length });
 });
@@ -145,7 +185,7 @@ function schedule(){
 function loadFb(){ try{ const a=JSON.parse(fs.readFileSync(FB_FILE,'utf8')); return Array.isArray(a)?a:[]; }catch(e){ return []; } }
 function saveFb(arr){ try{ fs.writeFileSync(FB_FILE, JSON.stringify(arr, null, 2)); }catch(e){} }
 
-app.post('/feedback', function(req, res){
+app.post('/feedback', rateLimit(5, 60*1000), function(req, res){
   const body = req.body || {};
   const type = String(body.type || 'feedback').slice(0, 20);
   const content = String(body.content || '').trim();
@@ -168,7 +208,7 @@ app.post('/feedback', function(req, res){
   res.json({ ok:true, id: rec.id, count: fb.length });
 });
 
-app.get('/feedback/list', function(req, res){
+app.get('/feedback/list', rateLimit(30, 60*1000), function(req, res){
   if(String(req.query.token||'') !== FB_TOKEN){ return res.json({ ok:false, err:'invalid token' }); }
   const list = loadFb();
   /* 默认按时间倒序，可选 ?type=bug 过滤 */
