@@ -59,19 +59,19 @@ app.get('/push', function(req, res){
   res.json({ ok:true, count: loadSubs().length });
 });
 
-/* 今日天干 + 五行（后端用 lunar 库算日柱，避免硬编码） */
+/* 今日天干+五行 + 流月天干+五行（后端用 lunar 库算，避免硬编码） */
 function todayGanWx(){
   try{
     const lunar = require('./lunar.min.js');
     const Lunar = lunar.Lunar || lunar;
     const l = Lunar.fromDate(new Date());
     const ec = l.getEightChar();
-    const gz = ec.getDay();
-    return { gan: gz[0], wx: GAN_WX[gz[0]] || '' };
-  }catch(e){ return { gan:'', wx:'' }; }
+    const gz = ec.getDay(), mgz = ec.getMonth();
+    return { gan: gz[0], wx: GAN_WX[gz[0]] || '', monthGan: mgz[0], monthWx: GAN_WX[mgz[0]] || '' };
+  }catch(e){ return { gan:'', wx:'', monthGan:'', monthWx:'' }; }
 }
 
-/* 按用户命理标签（日主/喜用/忌神）生成个性化推送正文 */
+/* 按用户命理标签（日主/喜用/忌神）生成个性化推送正文（今日 + 流月二维联动） */
 function pushBody(profile, t){
   if(!profile || !profile.xi || !profile.dayGan){
     return { title:'知命 · 今日运势', body:'打开看看今天的黄历、每日一签，和你的日主运势 →' };
@@ -79,11 +79,23 @@ function pushBody(profile, t){
   const gan = t.gan, twx = t.wx, xi = profile.xi, ji = profile.ji;
   const title = '知命 · ' + (gan ? ('今日【'+gan+'】日') : '今日') + '运势';
   let body;
-  if(twx && twx === xi)      body = '今日【'+gan+'】属【'+twx+'】，正合你的喜用神，气场旺你——宜推进大事、主动出击 →';
-  else if(twx && twx === ji) body = '今日【'+gan+'】属【'+twx+'】，恰为你的忌神，气场偏弱——宜稳守蓄力、少做冲动决定 →';
-  else if(twx && WX_SHENG[twx] === xi) body = '今日【'+gan+'】属【'+twx+'】，生助你的喜用神，亦是助力——可顺势而为 →';
-  else if(twx && WX_SHENG[xi] === twx) body = '今日【'+gan+'】属【'+twx+'】，泄你的喜用神之气——宜养精蓄锐、不宜冒进 →';
-  else body = '今日【'+gan+'】日，与你命局不冲不助——按黄历本意安稳度日即可 →';
+  if(twx && twx === xi)      body = '今日【'+gan+'】属【'+twx+'】，正合你的喜用神，气场旺你——宜推进大事、主动出击';
+  else if(twx && twx === ji) body = '今日【'+gan+'】属【'+twx+'】，恰为你的忌神，气场偏弱——宜稳守蓄力';
+  else if(twx && WX_SHENG[twx] === xi) body = '今日【'+gan+'】属【'+twx+'】，生助你的喜用神——可顺势而为';
+  else if(twx && WX_SHENG[xi] === twx) body = '今日【'+gan+'】属【'+twx+'】，泄你的喜用神之气——宜养精蓄锐';
+  else body = '今日【'+gan+'】日，与你命局不冲不助——安稳度日即可';
+  /* 流月补充（本月大方向，一个月换一次） */
+  if(t.monthGan && t.monthWx){
+    const mwx = t.monthWx;
+    let mTip;
+    if(mwx === xi) mTip = '本月【'+t.monthGan+'】月正旺你，宜乘势';
+    else if(mwx === ji) mTip = '本月【'+t.monthGan+'】月偏弱，宜守不宜攻';
+    else if(WX_SHENG[mwx] === xi) mTip = '本月【'+t.monthGan+'】月生助你，宜布局';
+    else mTip = '本月【'+t.monthGan+'】月平稳，稳扎稳打';
+    body += '；'+mTip+' →';
+  } else {
+    body += ' →';
+  }
   return { title: title, body: body };
 }
 
