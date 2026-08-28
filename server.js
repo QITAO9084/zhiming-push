@@ -10,6 +10,8 @@ const VAPID_PUBLIC = 'BNsz-7dIIL_T3UKUDcl9m61dC6jZF2L9ZtbyXW4FzpHjC9nJbvUyOMYZda
 const VAPID_PRIVATE = 'tXHrB8CxvYHh6iU7meuebdQnjTxA3t__Ve8pheFBqH8';
 const CONTACT = 'mailto:qt@example.com';
 const SUB_FILE = path.join(__dirname, 'subscribers.json');
+const FB_FILE = path.join(__dirname, 'feedback.json');
+const FB_TOKEN = process.env.FB_TOKEN || 'zhiming-fb-admin-2026';   // 反馈查询 token（生产请改 env）
 const PUSH_URL = 'https://zhiming.qtapi.space/';
 const PUSH_HOUR = 8;   // 北京时间每天几点推送（24 小时制）
 
@@ -139,5 +141,42 @@ function schedule(){
   }, 60 * 1000);
 }
 
+/* ===== 反馈系统：用户提交问题/Bug/建议，开发者查询 ===== */
+function loadFb(){ try{ const a=JSON.parse(fs.readFileSync(FB_FILE,'utf8')); return Array.isArray(a)?a:[]; }catch(e){ return []; } }
+function saveFb(arr){ try{ fs.writeFileSync(FB_FILE, JSON.stringify(arr, null, 2)); }catch(e){} }
+
+app.post('/feedback', function(req, res){
+  const body = req.body || {};
+  const type = String(body.type || 'feedback').slice(0, 20);
+  const content = String(body.content || '').trim();
+  if(content.length < 2){ return res.json({ ok:false, err:'反馈内容太短（≥2 字）' }); }
+  if(content.length > 2000){ return res.json({ ok:false, err:'反馈内容过长（≤2000 字）' }); }
+  const contact = String(body.contact || '').slice(0, 200);
+  const rec = {
+    id: Date.now() + '-' + Math.random().toString(36).slice(2, 8),
+    type: type,
+    content: content,
+    contact: contact,
+    page: String(body.page || '').slice(0, 200),
+    ua: String(body.ua || '').slice(0, 180),
+    ts: new Date().toISOString()
+  };
+  const fb = loadFb();
+  fb.push(rec);
+  saveFb(fb);
+  console.log('收到反馈：', type, '|', content.slice(0, 40), '...');
+  res.json({ ok:true, id: rec.id, count: fb.length });
+});
+
+app.get('/feedback/list', function(req, res){
+  if(String(req.query.token||'') !== FB_TOKEN){ return res.json({ ok:false, err:'invalid token' }); }
+  const list = loadFb();
+  /* 默认按时间倒序，可选 ?type=bug 过滤 */
+  const type = req.query.type;
+  let out = list.slice().reverse();
+  if(type) out = out.filter(function(x){ return x.type === type; });
+  res.json({ ok:true, total: list.length, shown: out.length, list: out });
+});
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, function(){ console.log('知命推送服务启动，端口 ' + PORT + '，每天 ' + PUSH_HOUR + ':00（北京）推送'); schedule(); });
+app.listen(PORT, function(){ console.log('知命推送服务启动，端口 ' + PORT + '，每天 ' + PUSH_HOUR + ':00（北京）推送；反馈 token 默认 = '+FB_TOKEN); schedule(); });
