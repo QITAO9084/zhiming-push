@@ -13,6 +13,11 @@ const SUB_FILE = path.join(__dirname, 'subscribers.json');
 const PUSH_URL = 'https://zhiming.qtapi.space/';
 const PUSH_HOUR = 8;   // 北京时间每天几点推送（24 小时制）
 
+/* 五行映射（与前端 app.js 保持一致） */
+const GAN_WX = { 甲:'木',乙:'木',丙:'火',丁:'火',戊:'土',己:'土',庚:'金',辛:'金',壬:'水',癸:'水' };
+const WX_SHENG = { 木:'火',火:'土',土:'金',金:'水',水:'木' };  // 木生火...
+const WX_KE = { 木:'土',土:'水',水:'火',火:'金',金:'木' };     // 木克土...
+
 webpush.setVapidDetails(CONTACT, VAPID_PUBLIC, VAPID_PRIVATE);
 
 const app = express();
@@ -29,8 +34,11 @@ function saveSubs(subs){
 app.post('/subscribe', function(req, res){
   const sub = req.body && req.body.subscription;
   if(!sub || !sub.endpoint){ return res.json({ ok:false, err:'invalid subscription' }); }
+  const profile = (req.body && req.body.profile) || null;
+  const rec = { endpoint: sub.endpoint, keys: sub.keys, profile: profile };
   let subs = loadSubs();
-  if(!subs.some(function(s){ return s.endpoint === sub.endpoint; })) subs.push(sub);
+  const idx = subs.findIndex(function(s){ return s.endpoint === sub.endpoint; });
+  if(idx >= 0) subs[idx] = rec; else subs.push(rec);
   saveSubs(subs);
   res.json({ ok:true, count: subs.length });
 });
@@ -51,17 +59,44 @@ app.get('/push', function(req, res){
   res.json({ ok:true, count: loadSubs().length });
 });
 
+/* 今日天干 + 五行（后端用 lunar 库算日柱，避免硬编码） */
+function todayGanWx(){
+  try{
+    const lunar = require('./lunar.min.js');
+    const Lunar = lunar.Lunar || lunar;
+    const l = Lunar.fromDate(new Date());
+    const ec = l.getEightChar();
+    const gz = ec.getDay();
+    return { gan: gz[0], wx: GAN_WX[gz[0]] || '' };
+  }catch(e){ return { gan:'', wx:'' }; }
+}
+
+/* 按用户命理标签（日主/喜用/忌神）生成个性化推送正文 */
+function pushBody(profile, t){
+  if(!profile || !profile.xi || !profile.dayGan){
+    return { title:'知命 · 今日运势', body:'打开看看今天的黄历、每日一签，和你的日主运势 →' };
+  }
+  const gan = t.gan, twx = t.wx, xi = profile.xi, ji = profile.ji;
+  const title = '知命 · ' + (gan ? ('今日【'+gan+'】日') : '今日') + '运势';
+  let body;
+  if(twx && twx === xi)      body = '今日【'+gan+'】属【'+twx+'】，正合你的喜用神，气场旺你——宜推进大事、主动出击 →';
+  else if(twx && twx === ji) body = '今日【'+gan+'】属【'+twx+'】，恰为你的忌神，气场偏弱——宜稳守蓄力、少做冲动决定 →';
+  else if(twx && WX_SHENG[twx] === xi) body = '今日【'+gan+'】属【'+twx+'】，生助你的喜用神，亦是助力——可顺势而为 →';
+  else if(twx && WX_SHENG[xi] === twx) body = '今日【'+gan+'】属【'+twx+'】，泄你的喜用神之气——宜养精蓄锐、不宜冒进 →';
+  else body = '今日【'+gan+'】日，与你命局不冲不助——按黄历本意安稳度日即可 →';
+  return { title: title, body: body };
+}
+
 function pushNow(){
   const subs = loadSubs();
   if(!subs.length) return console.log('无订阅，跳过');
-  const payload = JSON.stringify({
-    title: '知命 · 今日运势',
-    body: '打开看看今天的黄历、每日一签，和你的日主运势 →',
-    url: PUSH_URL
-  });
+  const t = todayGanWx();
   let dropped = 0;
   Promise.all(subs.map(function(sub){
-    return webpush.sendNotification(sub, payload).catch(function(err){
+    const msg = pushBody(sub.profile, t);
+    const payload = JSON.stringify({ title: msg.title, body: msg.body, url: PUSH_URL });
+    const cleanSub = { endpoint: sub.endpoint, keys: sub.keys };
+    return webpush.sendNotification(cleanSub, payload).catch(function(err){
       if(err.statusCode === 404 || err.statusCode === 410){ dropped++; return sub.endpoint; }
       return null;
     });
