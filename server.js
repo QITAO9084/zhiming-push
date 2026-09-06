@@ -25,14 +25,14 @@ const PUSH_HOUR = 8;   // 北京时间每天几点推送（24 小时制）
  * CF_TOKEN 走环境变量（不进代码/日志/git）；KV_ACCOUNT / KV_NS 非敏感可内置。
  * KV 未配置或网络失败时自动降级本地文件（开发/单测照常）。 */
 const KV_ACCOUNT = 'acbe9ea49235a87c4c6b014a747cb3df';
-const KV_NS = process.env.CF_NS || 'CFFILL_NS';   // namespace id（创建后回填，或 env 覆盖）
+const KV_NS = process.env.CF_NS || 'ab707355826449be84175b640916ff34';   // zhiming-push namespace
 function kvBase(key){
   return 'https://api.cloudflare.com/client/v4/accounts/' + KV_ACCOUNT
     + '/storage/kv/namespaces/' + KV_NS + '/values/' + key;
 }
 function kvFetch(url, opts){
   const tk = process.env.CF_TOKEN;
-  if(!tk || !KV_NS || KV_NS.indexOf('CFFILL_NS') === 0) return Promise.resolve(null);
+  if(!tk || !KV_NS || KV_NS.length < 10) return Promise.resolve(null);
   const ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
   const tm = ctl ? setTimeout(function(){ ctl.abort(); }, 6000) : null;
   const o = Object.assign({}, opts || {});
