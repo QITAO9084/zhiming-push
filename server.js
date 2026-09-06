@@ -67,7 +67,21 @@ const WX_KE = { 木:'土',土:'水',水:'火',火:'金',金:'木' };     // 木�
 webpush.setVapidDetails(CONTACT, VAPID_PUBLIC, VAPID_PRIVATE);
 
 const app = express();
-app.use(express.json());
+app.use(express.json({limit:'32kb'}));
+/* ===== CORS：浏览器跨域 POST 必走 OPTIONS 预检，没这头会被浏览器直接拒绝（curl 不受影响） ===== */
+const CORS_ALLOW = ['https://zhiming.qtapi.space', 'https://zhiming-1oy.pages.dev', 'http://localhost'];  // 已知合法 Origin 白名单
+app.use(function corsMw(req, res, next){
+  const o = req.headers.origin || '';
+  if(CORS_ALLOW.indexOf(o) >= 0){
+    res.setHeader('Access-Control-Allow-Origin', o);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Max-Age', '86400');
+  }
+  if(req.method === 'OPTIONS'){ return res.sendStatus(204); }  // 预检直接 204
+  next();
+});
 
 /* ===== 安全防护：内存限流（IP 维度）+ Origin 校验 ===== */
 const rateMap = {};   // { ip: { count, reset } }
