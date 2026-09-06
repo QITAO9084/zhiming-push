@@ -1,5 +1,8 @@
-/* 知命 · 每日运势推送后端（Web Push）
+/* 知命 · 每日晨报推送后端（Web Push）
  * 部署到 Railway / Render / 任意 Node 托管，拿到 HTTPS 地址后填到前端 PUSH_API_BASE 即可。
+ * 2026-09-06（P0#3）：正文从「五行一句话」升级为「晨间迷你早报」：
+ *   干支日+黄历宜 → 五行视角句（5 档正向措辞）→ 微光金句（22 句按日期种子轮换，同日全站同句）。
+ *   无命理档案的用户同样收到完整晨报（今日氛围通适句），末尾轻引导建档（不硬广）。
  */
 const express = require('express');
 const webpush = require('web-push');
@@ -101,50 +104,120 @@ app.get('/push', rateLimit(30, 60*1000), function(req, res){
   res.json({ ok:true, count: loadSubs().length });
 });
 
-/* 今日天干+五行 + 流月天干+五行（后端用 lunar 库算，避免硬编码） */
-function todayGanWx(){
+/* 今日历象：日干+五行、日柱干支全串、流月干+五行、农历月日、黄历宜（后端用 lunar 库算） */
+function todayGanWx(d){
   try{
     const lunar = require('./lunar.min.js');
     const Lunar = lunar.Lunar || lunar;
-    const l = Lunar.fromDate(new Date());
+    const l = Lunar.fromDate(d || new Date());
     const ec = l.getEightChar();
     const gz = ec.getDay(), mgz = ec.getMonth();
-    return { gan: gz[0], wx: GAN_WX[gz[0]] || '', monthGan: mgz[0], monthWx: GAN_WX[mgz[0]] || '' };
-  }catch(e){ return { gan:'', wx:'', monthGan:'', monthWx:'' }; }
+    let lunarTxt = '';
+    try{
+      const lm = l.getMonthInChinese ? l.getMonthInChinese() : '';
+      const ld = l.getDayInChinese ? l.getDayInChinese() : '';
+      const leap = (l.getYear && typeof l.getYearInGanZhiByLiChun === 'undefined' && l.isLeapMonth && l.isLeapMonth()) ? '闰' : '';
+      lunarTxt = leap + lm + '月' + ld;
+    }catch(e2){}
+    let yi = [];
+    try{ yi = (l.getDayYi ? l.getDayYi() : []).slice(0, 3); }catch(e3){}
+    return {
+      gan: gz[0], wx: GAN_WX[gz[0]] || '', dayGZ: gz,
+      monthGan: mgz[0], monthWx: GAN_WX[mgz[0]] || '', monthGZ: mgz,
+      lunarTxt: lunarTxt, yi: yi
+    };
+  }catch(e){ return { gan:'', wx:'', dayGZ:'', monthGan:'', monthWx:'', monthGZ:'', lunarTxt:'', yi:[] }; }
 }
 
-/* 按用户命理标签（日主/喜用/忌神）生成个性化推送正文（今日 + 流月二维联动） */
+/* ===== 晨报「微光一句」话术池（情绪陪伴层：不预测、不恐吓，只给温柔提醒；同日全站同句） ===== */
+const QUOTES = [
+  '慢慢来，比较快。',
+  '今天不必完美，开始就很好。',
+  '你走的每一步，都算数。',
+  '先照顾好自己，再照顾好世界。',
+  '有些答案，走着走着就清楚了。',
+  '允许自己慢一点，天不会塌。',
+  '把今天过好，明天自有答案。',
+  '少想一点万一，多做一点现在。',
+  '你比自己以为的更扛得住。',
+  '温柔待人，也温柔待己。',
+  '今天做的小事，是明天的底气。',
+  '别怕选错，试过才知道答案。',
+  '休息不是偷懒，是在给自己充电。',
+  '向外看是方向，向内看是力量。',
+  '稳稳地走，比快快地跑更长久。',
+  '心里有光，走到哪里都不暗。',
+  '今天种下的耐心，明天会发芽。',
+  '不必追赶所有人，走自己的时区。',
+  '深呼吸，你已经做得很好了。',
+  '把期待放低一点，惊喜反而更多。',
+  '日子是过出来的，不是想出来的。',
+  '把今天过踏实，就是给明天最好的礼物。'
+];
+/* 日期串 → 稳定整数种子（同日全员同句，次日自然轮换） */
+function seedOf(dateStr){
+  let h = 0;
+  const s = String(dateStr || '');
+  for(let i = 0; i < s.length; i++){ h = (h * 31 + s.charCodeAt(i)) >>> 0; }
+  return h;
+}
+/* 无命理档案时的「今日氛围」通适句（按日干五行，只给行为灵感不给断言） */
+const DAY_MOOD = {
+  '木': '今天的气在生长，适合学点新的、开个头。',
+  '火': '今天的气在发光，适合表达与分享，把想法讲出来。',
+  '土': '今天的气在沉淀，适合整理与规划，把事做扎实。',
+  '金': '今天的气在收束，适合做决断、清清单、了结旧事。',
+  '水': '今天的气在流动，适合沟通走动、连接新的人。'
+};
+/* 五行视角句：5 档全正向收尾，忌神场景只给策略不给恐吓 */
+function wxLine(twx, xi, ji){
+  if(twx === xi) return '今日【' + twx + '】气与你同频，适合把惦记已久的事往前推一步。';
+  if(ji && twx === ji) return '今日【' + twx + '】气与你的步调相左——不急，拆小步走稳就是赢。';
+  if(WX_SHENG[twx] === xi) return '今日【' + twx + '】气生助你的节奏，适合把想法落成具体行动。';
+  if(WX_SHENG[xi] === twx) return '今日【' + twx + '】气会带走一些能量——要紧事先做，给自己留点白。';
+  return '今日【' + twx + '】气与你相安，按自己的节奏过，就很好。';
+}
+/* 流月一句（月度背景，一个月换一次，正向收尾） */
+function monthLine(mwx, xi, ji){
+  if(mwx === xi) return '本月【' + mwx + '】气旺你，大方向可以更笃定。';
+  if(ji && mwx === ji) return '本月【' + mwx + '】气与你不合拍，稳字当头，不必硬冲。';
+  if(WX_SHENG[mwx] === xi) return '本月【' + mwx + '】气生助你，适合播种与布局。';
+  return '本月【' + mwx + '】气平稳，按部就班即可。';
+}
+/* 标题：知命晨报 · M月D日 */
+function titleOf(t){
+  const s = t && t.dateStr;
+  if(s && s.length >= 10){
+    const mm = parseInt(s.slice(5, 7), 10), dd = parseInt(s.slice(8, 10), 10);
+    return '知命晨报 · ' + mm + '月' + dd + '日';
+  }
+  return '知命晨报';
+}
+
+/* 晨报正文：三段式。profile=null 也出完整晨报（通适句 + 轻引导建档） */
 function pushBody(profile, t){
-  if(!profile || !profile.xi || !profile.dayGan){
-    return { title:'知命 · 今日运势', body:'打开看看今天的黄历、每日一签，和你的日主运势 →' };
-  }
-  const gan = t.gan, twx = t.wx, xi = profile.xi, ji = profile.ji;
-  const title = '知命 · ' + (gan ? ('今日【'+gan+'】日') : '今日') + '运势';
-  let body;
-  if(twx && twx === xi)      body = '今日【'+gan+'】属【'+twx+'】，正合你的喜用神，气场旺你——宜推进大事、主动出击';
-  else if(twx && twx === ji) body = '今日【'+gan+'】属【'+twx+'】，恰为你的忌神，气场偏弱——宜稳守蓄力';
-  else if(twx && WX_SHENG[twx] === xi) body = '今日【'+gan+'】属【'+twx+'】，生助你的喜用神——可顺势而为';
-  else if(twx && WX_SHENG[xi] === twx) body = '今日【'+gan+'】属【'+twx+'】，泄你的喜用神之气——宜养精蓄锐';
-  else body = '今日【'+gan+'】日，与你命局不冲不助——安稳度日即可';
-  /* 流月补充（本月大方向，一个月换一次） */
-  if(t.monthGan && t.monthWx){
-    const mwx = t.monthWx;
-    let mTip;
-    if(mwx === xi) mTip = '本月【'+t.monthGan+'】月正旺你，宜乘势';
-    else if(mwx === ji) mTip = '本月【'+t.monthGan+'】月偏弱，宜守不宜攻';
-    else if(WX_SHENG[mwx] === xi) mTip = '本月【'+t.monthGan+'】月生助你，宜布局';
-    else mTip = '本月【'+t.monthGan+'】月平稳，稳扎稳打';
-    body += '；'+mTip+' →';
-  } else {
-    body += ' →';
-  }
-  return { title: title, body: body };
+  const hasPro = !!(profile && profile.dayGan);
+  const xi = profile && profile.xi, ji = profile && profile.ji;
+  const headParts = [];
+  if(t.lunarTxt) headParts.push(t.lunarTxt);
+  if(t.dayGZ) headParts.push(t.dayGZ + '日');
+  if(t.yi && t.yi.length) headParts.push('宜 ' + t.yi.join(' '));
+  const head = headParts.join(' · ');
+  const mid = (hasPro && t.wx) ? wxLine(t.wx, xi, ji) : (t.wx ? (DAY_MOOD[t.wx] || '') : '');
+  const month = (hasPro && t.monthWx) ? monthLine(t.monthWx, xi, ji) : '';
+  const quote = '✨ ' + QUOTES[seedOf(t.dateStr) % QUOTES.length];
+  const lines = [head, mid, month, quote].filter(function(x){ return !!x; });
+  if(!hasPro) lines.push('想让晨报更懂你？点开建个命理档案，多一层专属视角 →');
+  const body = lines.join('\n');
+  return { title: titleOf(t), body: body };
 }
 
 function pushNow(){
   const subs = loadSubs();
   if(!subs.length) return console.log('无订阅，跳过');
-  const t = todayGanWx();
+  const cn = beijingNow();
+  const t = todayGanWx(cn);
+  t.dateStr = fmtDate(cn);
   let dropped = 0;
   Promise.all(subs.map(function(sub){
     const msg = pushBody(sub.profile, t);
@@ -218,5 +291,15 @@ app.get('/feedback/list', rateLimit(30, 60*1000), function(req, res){
   res.json({ ok:true, total: list.length, shown: out.length, list: out });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, function(){ console.log('知命推送服务启动，端口 ' + PORT + '，每天 ' + PUSH_HOUR + ':00（北京）推送；反馈 token 默认 = '+FB_TOKEN); schedule(); });
+function fmtDate(d){
+  const p = function(n){ return (n < 10 ? '0' : '') + n; };
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+
+/* 条件启动：被 require（本地单测）时不起服务不设定时器 */
+if (require.main === module){
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, function(){ console.log('知命推送服务启动，端口 ' + PORT + '，每天 ' + PUSH_HOUR + ':00（北京）推送；反馈 token 默认 = '+FB_TOKEN); schedule(); });
+}
+module.exports = { app: app, pushBody: pushBody, todayGanWx: todayGanWx, pushNow: pushNow,
+  QUOTES: QUOTES, seedOf: seedOf, fmtDate: fmtDate, beijingNow: beijingNow, loadSubs: loadSubs };
