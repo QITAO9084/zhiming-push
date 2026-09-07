@@ -5,6 +5,9 @@
  *   无命理档案的用户同样收到完整晨报（今日氛围通适句），末尾轻引导建档（不硬广）。
  * 2026-09-06（持久化）：订阅/反馈存 Cloudflare Workers KV（跨重启稳定），本地文件作镜像/降级。
  *   解决 Render 免费层重启清空 subscribers.json 导致订阅归零的硬伤。CF_TOKEN 走环境变量。
+ * 2026-09-07（v113cy 晨报章名化）：标题与首页「今日一页」同构——守灯晨报 · 第N日 · 节气章名。
+ *   天地节律(节气+候) 命名今天，个人节律(firstDay=客户端 fz_first_day) 编号第N日，跨端同一故事页码。
+ *   firstDay 缺失时只出章名不出页码；订阅/重订时取更早日期（最早陪伴日）。
  */
 const express = require('express');
 const webpush = require('web-push');
@@ -141,13 +144,21 @@ async function saveSubs(subs){
 
 app.post('/subscribe', rateLimit(10, 60*1000), async function(req, res){
   try{
-    const sub = req.body && req.body.subscription;
+    const body = req.body || {};
+    const sub = body.subscription;
     if(!sub || !sub.endpoint){ return res.json({ ok:false, err:'invalid subscription' }); }
-    const profile = (req.body && req.body.profile) || null;
-    const rec = { endpoint: sub.endpoint, keys: sub.keys, profile: profile };
+    const profile = body.profile || null;
+    const fdIn = normDay(body.firstDay);
     const subs = await loadSubs();
     const idx = subs.findIndex(function(s){ return s.endpoint === sub.endpoint; });
-    if(idx >= 0) subs[idx] = rec; else subs.push(rec);
+    const rec = { endpoint: sub.endpoint, keys: sub.keys, profile: profile, firstDay: fdIn };
+    if(idx >= 0){
+      /* 重订：firstDay 取更早（第N日从最早陪伴日算起），档案/订阅信息用最新 */
+      rec.firstDay = earlierDay(subs[idx].firstDay, fdIn);
+      subs[idx] = rec;
+    } else {
+      subs.push(rec);
+    }
     await saveSubs(subs);
     res.json({ ok:true, count: subs.length });
   }catch(e){ res.status(500).json({ ok:false, err:'server error' }); }
@@ -176,12 +187,40 @@ app.get('/push', rateLimit(30, 60*1000), async function(req, res){
   }catch(e){ res.status(500).json({ ok:false, err:'push error' }); }
 });
 
-/* 今日历象：日干+五行、日柱干支全串、流月干+五行、农历月日、黄历宜（后端用 lunar 库算） */
+/* 章名候位用（与首页今日一页一致）：交节当天=初候，之后每 5 天一候 */
+const HOU_CN = ['', '初候', '二候', '三候'];
+
+/* 今日历象：日干+五行、日柱干支全串、流月干+五行、农历月日、黄历宜 + 节气章名(ch)/候位(hou)（后端用 lunar 库算） */
+/* 章名算法移植自前端 app.js _tpChapter（v113cu）：交节日当天 getJieQi 非空 → 该节气·初候；
+   否则取上一节气，距其交节日天数 diff → 候 = min(3, floor(diff/5)+1)；兜底农历月名。 */
+function chapterOfD(l, now){
+  try{
+    let ch = '', hou = 0;
+    try{
+      const jqT = (typeof l.getJieQi === 'function') ? (l.getJieQi() || '') : '';
+      if(jqT){ ch = jqT; hou = 1; }
+      else{
+        const pj = l.getPrevJieQi();
+        ch = pj.getName() || '';
+        const s = pj.getSolar();
+        const jd = new Date(s.getYear(), s.getMonth() - 1, s.getDay()).getTime();
+        let diff = Math.floor((now.getTime() - jd) / 86400000);
+        if(diff < 0) diff = 0;
+        hou = Math.min(3, Math.floor(diff / 5) + 1);
+      }
+    }catch(e){ ch = ''; hou = 0; }
+    if(!ch){
+      try{ ch = (l.getMonthInChinese ? l.getMonthInChinese() : '') + '月'; hou = 0; }catch(e){}
+    }
+    return { ch: ch, hou: hou };
+  }catch(e){ return { ch:'', hou:0 }; }
+}
 function todayGanWx(d){
   try{
     const lunar = require('./lunar.min.js');
     const Lunar = lunar.Lunar || lunar;
-    const l = Lunar.fromDate(d || new Date());
+    const now = d || new Date();
+    const l = Lunar.fromDate(now);
     const ec = l.getEightChar();
     const gz = ec.getDay(), mgz = ec.getMonth();
     let lunarTxt = '';
@@ -193,12 +232,14 @@ function todayGanWx(d){
     }catch(e2){}
     let yi = [];
     try{ yi = (l.getDayYi ? l.getDayYi() : []).slice(0, 3); }catch(e3){}
+    const jc = chapterOfD(l, now);
     return {
       gan: gz[0], wx: GAN_WX[gz[0]] || '', dayGZ: gz,
       monthGan: mgz[0], monthWx: GAN_WX[mgz[0]] || '', monthGZ: mgz,
-      lunarTxt: lunarTxt, yi: yi
+      lunarTxt: lunarTxt, yi: yi,
+      ch: jc.ch, hou: jc.hou
     };
-  }catch(e){ return { gan:'', wx:'', dayGZ:'', monthGan:'', monthWx:'', monthGZ:'', lunarTxt:'', yi:[] }; }
+  }catch(e){ return { gan:'', wx:'', dayGZ:'', monthGan:'', monthWx:'', monthGZ:'', lunarTxt:'', yi:[], ch:'', hou:0 }; }
 }
 
 /* ===== 晨报「微光一句」话术池（情绪陪伴层：不预测、不恐吓，只给温柔提醒；同日全站同句） ===== */
@@ -256,21 +297,59 @@ function monthLine(mwx, xi, ji){
   if(WX_SHENG[mwx] === xi) return '本月【' + mwx + '】气生助你，适合播种与布局。';
   return '本月【' + mwx + '】气平稳，按部就班即可。';
 }
-/* 标题：知命晨报 · M月D日 */
-function titleOf(t){
-  const s = t && t.dateStr;
+/* ===== 日期工具：firstDay 规范化 / 取更早 / 第N日 ===== */
+function normDay(v){
+  const s = String(v || '').trim();
+  return (/^\d{4}-\d{2}-\d{2}$/.test(s)) ? s : '';
+}
+function earlierDay(a, b){
+  a = normDay(a); b = normDay(b);
+  if(!a) return b;
+  if(!b) return a;
+  return (a <= b) ? a : b;
+}
+/* 第 N 日：距 firstDay 天数 +1（与首页「今日一页」同口径），无效返回 0（不显示页码） */
+function dayNOf(firstDay, dateStr){
+  try{
+    const f = normDay(firstDay), t = normDay(dateStr);
+    if(!f || !t) return 0;
+    const fd = new Date(f.replace(/-/g, '/'));
+    const td = new Date(t.replace(/-/g, '/'));
+    if(isNaN(fd.getTime()) || isNaN(td.getTime())) return 0;
+    const d = Math.floor((td.getTime() - fd.getTime()) / 86400000) + 1;
+    return (d >= 1) ? d : 0;
+  }catch(e){ return 0; }
+}
+/* 章名串：白露·初候 / 白露 / 兜底 M月D日 */
+function chTxt(t){
+  if(!t) return '';
+  if(t.ch) return t.ch + (t.hou ? '·' + HOU_CN[t.hou] : '');
+  const s = t.dateStr;
   if(s && s.length >= 10){
     const mm = parseInt(s.slice(5, 7), 10), dd = parseInt(s.slice(8, 10), 10);
-    return '知命晨报 · ' + mm + '月' + dd + '日';
+    return mm + '月' + dd + '日';
   }
-  return '知命晨报';
+  return '';
+}
+/* 标题：与首页「今日一页」同构 —— 守灯晨报 · 第N日 · 白露·初候（天地节律+个人节律页码） */
+function titleOf(t, meta){
+  meta = meta || {};
+  const parts = ['守灯晨报'];
+  if(meta.dayN >= 1) parts.push('第' + meta.dayN + '日');
+  const ct = chTxt(t);
+  if(ct) parts.push(ct);
+  return parts.join(' · ');
 }
 
-/* 晨报正文：三段式。profile=null 也出完整晨报（通适句 + 轻引导建档） */
-function pushBody(profile, t){
+/* 晨报正文：三段式。profile=null 也出完整晨报（通适句 + 轻引导建档）。
+   meta = { firstDay }：决定标题「第N日」页码（无 firstDay 只出章名，不出页码）。 */
+function pushBody(profile, t, meta){
+  meta = meta || {};
+  t = t || {};
   const hasPro = !!(profile && profile.dayGan);
   const xi = profile && profile.xi, ji = profile && profile.ji;
   const headParts = [];
+  if(t.ch) headParts.push(t.ch + (t.hou ? '·' + HOU_CN[t.hou] : ''));
   if(t.lunarTxt) headParts.push(t.lunarTxt);
   if(t.dayGZ) headParts.push(t.dayGZ + '日');
   if(t.yi && t.yi.length) headParts.push('宜 ' + t.yi.join(' '));
@@ -281,7 +360,8 @@ function pushBody(profile, t){
   const lines = [head, mid, month, quote].filter(function(x){ return !!x; });
   if(!hasPro) lines.push('想让晨报更懂你？点开建个命理档案，多一层专属视角 →');
   const body = lines.join('\n');
-  return { title: titleOf(t), body: body };
+  const dayN = dayNOf(meta.firstDay, t.dateStr);
+  return { title: titleOf(t, { dayN: dayN }), body: body };
 }
 
 async function pushNow(){
@@ -292,7 +372,7 @@ async function pushNow(){
   t.dateStr = fmtDate(cn);
   let dropped = 0;
   const results = await Promise.all(subs.map(function(sub){
-    const msg = pushBody(sub.profile, t);
+    const msg = pushBody(sub.profile, t, { firstDay: sub.firstDay });
     const payload = JSON.stringify({ title: msg.title, body: msg.body, url: PUSH_URL });
     const cleanSub = { endpoint: sub.endpoint, keys: sub.keys };
     return webpush.sendNotification(cleanSub, payload).catch(function(err){
@@ -392,4 +472,5 @@ if (require.main === module){
 module.exports = { app: app, pushBody: pushBody, todayGanWx: todayGanWx, pushNow: pushNow,
   QUOTES: QUOTES, seedOf: seedOf, fmtDate: fmtDate, beijingNow: beijingNow,
   loadSubs: loadSubs, saveSubs: saveSubs, loadFb: loadFb, saveFb: saveFb,
-  kvGet: kvGet, kvPut: kvPut, KV_ACCOUNT: KV_ACCOUNT, KV_NS: KV_NS };
+  kvGet: kvGet, kvPut: kvPut, KV_ACCOUNT: KV_ACCOUNT, KV_NS: KV_NS,
+  normDay: normDay, earlierDay: earlierDay, dayNOf: dayNOf, titleOf: titleOf, chTxt: chTxt, HOU_CN: HOU_CN };
