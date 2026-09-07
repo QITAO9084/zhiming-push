@@ -8,6 +8,8 @@
  * 2026-09-07（v113cy 晨报章名化）：标题与首页「今日一页」同构——守灯晨报 · 第N日 · 节气章名。
  *   天地节律(节气+候) 命名今天，个人节律(firstDay=客户端 fz_first_day) 编号第N日，跨端同一故事页码。
  *   firstDay 缺失时只出章名不出页码；订阅/重订时取更早日期（最早陪伴日）。
+ * 2026-09-07（v113db）：推送点击 URL 加 ?from=push 来源标记（与站内 from=share/echo 同体系）。
+ *   说明：当前 09:00 报告走 CF GraphQL（clientRequestPath 不含 query），来源分段需后续客户端埋点支持。
  */
 const express = require('express');
 const webpush = require('web-push');
@@ -22,7 +24,7 @@ const FB_FILE = path.join(__dirname, 'feedback.json');
 const FB_TOKEN = process.env.FB_TOKEN || 'zhiming-fb-admin-2026';   // 反馈查询 token（生产请改 env）
 const PUSH_URL = 'https://zhiming.qtapi.space/';
 const PUSH_HOUR = 8;   // 北京时间每天几点推送（24 小时制）
-const SVR_VER = 'v113cy';   // 部署验证用（GET / 输出）
+const SVR_VER = 'v113db';   // 部署验证用（GET / 输出）
 
 /* ===== 持久化层：Cloudflare Workers KV（主存储）+ 本地文件（镜像/降级） =====
  * Render free 重启清空本地磁盘 → 订阅/反馈存 KV 跨重启稳定。
@@ -374,7 +376,7 @@ async function pushNow(){
   let dropped = 0;
   const results = await Promise.all(subs.map(function(sub){
     const msg = pushBody(sub.profile, t, { firstDay: sub.firstDay });
-    const payload = JSON.stringify({ title: msg.title, body: msg.body, url: PUSH_URL });
+    const payload = JSON.stringify({ title: msg.title, body: msg.body, url: PUSH_URL + '?from=push' });
     const cleanSub = { endpoint: sub.endpoint, keys: sub.keys };
     return webpush.sendNotification(cleanSub, payload).catch(function(err){
       if(err.statusCode === 404 || err.statusCode === 410){ dropped++; return sub.endpoint; }
