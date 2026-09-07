@@ -22,6 +22,7 @@ const FB_FILE = path.join(__dirname, 'feedback.json');
 const FB_TOKEN = process.env.FB_TOKEN || 'zhiming-fb-admin-2026';   // 反馈查询 token（生产请改 env）
 const PUSH_URL = 'https://zhiming.qtapi.space/';
 const PUSH_HOUR = 8;   // 北京时间每天几点推送（24 小时制）
+const SVR_VER = 'v113cy';   // 部署验证用（GET / 输出）
 
 /* ===== 持久化层：Cloudflare Workers KV（主存储）+ 本地文件（镜像/降级） =====
  * Render free 重启清空本地磁盘 → 订阅/反馈存 KV 跨重启稳定。
@@ -176,7 +177,7 @@ app.post('/unsubscribe', async function(req, res){
 
 app.get('/', async function(req, res){
   const n = (await loadSubs()).length;
-  res.send('知命推送服务运行中，订阅数：' + n);
+  res.send('知命推送服务（' + SVR_VER + '）运行中，订阅数：' + n);
 });
 
 /* 手动触发推送（供外部 cron 定时调用，解决 Render 免费层 idle 后 setInterval 不跑的问题） */
