@@ -10,6 +10,12 @@
  *   firstDay 缺失时只出章名不出页码；订阅/重订时取更早日期（最早陪伴日）。
  * 2026-09-07（v113db）：推送点击 URL 加 ?from=push 来源标记（与站内 from=share/echo 同体系）。
  *   说明：当前 09:00 报告走 CF GraphQL（clientRequestPath 不含 query），来源分段需后续客户端埋点支持。
+ * 2026-09-26（v113dc 当日去重）：/push（外部 cron）与 schedule()（进程内 setInterval）是两条
+ *   互不知情的触发路径，原先各推一次 —— Render 免费层被 cron 唤醒时进程刚启动、lastDate 为空，
+ *   于是「cron 推一条 + 下一分钟定时器再推一条」必然发生。现改为共享「当天已推」标记，
+ *   同一天只推一次；?force=1 可手动补推。
+ *   注：前端 sw.js 用固定 tag（zhiming-daily），重复通知会被浏览器**替换**而非叠加，
+ *   所以这个缺陷在界面上一直看不出来（但白跑一次推送 + 日志噪声是真实的）。
  */
 const express = require('express');
 const webpush = require('web-push');
@@ -24,7 +30,7 @@ const FB_FILE = path.join(__dirname, 'feedback.json');
 const FB_TOKEN = process.env.FB_TOKEN || 'zhiming-fb-admin-2026';   // 反馈查询 token（生产请改 env）
 const PUSH_URL = 'https://zhiming.qtapi.space/';
 const PUSH_HOUR = 8;   // 北京时间每天几点推送（24 小时制）
-const SVR_VER = 'v113db';   // 部署验证用（GET / 输出）
+const SVR_VER = 'v113dc';   // 部署验证用（GET / 输出）
 
 /* ===== 持久化层：Cloudflare Workers KV（主存储）+ 本地文件（镜像/降级） =====
  * Render free 重启清空本地磁盘 → 订阅/反馈存 KV 跨重启稳定。
@@ -182,12 +188,23 @@ app.get('/', async function(req, res){
   res.send('知命推送服务（' + SVR_VER + '）运行中，订阅数：' + n);
 });
 
-/* 手动触发推送（供外部 cron 定时调用，解决 Render 免费层 idle 后 setInterval 不跑的问题） */
+/* 手动触发推送（供外部 cron 定时调用，解决 Render 免费层 idle 后 setInterval 不跑的问题）
+ * ?force=1 绕过当日去重（手动补推用，比如今天已经推过但想再发一条）。 */
 app.get('/push', rateLimit(30, 60*1000), async function(req, res){
+  const force = String(req.query.force || '') === '1';
   try{
+    if(force){
+      lastPushDay = dayKeyCN();
+    } else if(!claimToday()){
+      return res.json({ ok:true, skipped:true, reason:'already_pushed_today',
+                        day: lastPushDay, count: (await loadSubs()).length });
+    }
     await pushNow();
-    res.json({ ok:true, count: (await loadSubs()).length });
-  }catch(e){ res.status(500).json({ ok:false, err:'push error' }); }
+    res.json({ ok:true, count: (await loadSubs()).length, day: lastPushDay });
+  }catch(e){
+    if(!force) rollbackPushDay();
+    res.status(500).json({ ok:false, err:'push error' });
+  }
 });
 
 /* 章名候位用（与首页今日一页一致）：交节当天=初候，之后每 5 天一候 */
@@ -392,19 +409,35 @@ async function pushNow(){
   console.log('推送完成，当前订阅：', (await loadSubs()).length);
 }
 
+/* ===== 当日推送去重（v113dc）=====
+ * 两条触发路径：① 外部 cron 打 GET /push（免费层下唯一可靠的路径）
+ *              ② 进程内 setInterval 到点自推（服务恰好醒着时的兜底）
+ * 原来两者各推一次且互不知情。现共享 lastPushDay：同一天只推一次。
+ * 占位采用「先记账再推」的乐观锁 —— 防止两条路径同时穿过检查。 */
+let lastPushDay = '';
+function dayKeyCN(){
+  const cn = beijingNow();
+  const p = function(n){ return (n < 10 ? '0' : '') + n; };
+  return cn.getFullYear() + '-' + p(cn.getMonth() + 1) + '-' + p(cn.getDate());
+}
+function claimToday(){
+  const k = dayKeyCN();
+  if(k === lastPushDay) return false;
+  lastPushDay = k;
+  return true;
+}
+function rollbackPushDay(){ lastPushDay = ''; }
+
 /* 定时：每分钟检查一次是否到 PUSH_HOUR 点整（北京时间） */
 function beijingNow(){
   return new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
 }
 function schedule(){
-  let lastDate = '';
   setInterval(function(){
     const cn = beijingNow();
-    const key = cn.getFullYear()+'-'+cn.getMonth()+'-'+cn.getDate();
-    if(cn.getHours() === PUSH_HOUR && key !== lastDate){
-      lastDate = key;
-      pushNow();
-    }
+    if(cn.getHours() !== PUSH_HOUR) return;
+    if(!claimToday()) return;                       // 当天已推（cron 已推过）→ 跳过
+    pushNow().catch(function(){ rollbackPushDay(); });
   }, 60 * 1000);
 }
 
@@ -474,6 +507,7 @@ if (require.main === module){
 }
 module.exports = { app: app, pushBody: pushBody, todayGanWx: todayGanWx, pushNow: pushNow,
   QUOTES: QUOTES, seedOf: seedOf, fmtDate: fmtDate, beijingNow: beijingNow,
+  dayKeyCN: dayKeyCN, claimToday: claimToday, rollbackPushDay: rollbackPushDay,
   loadSubs: loadSubs, saveSubs: saveSubs, loadFb: loadFb, saveFb: saveFb,
   kvGet: kvGet, kvPut: kvPut, KV_ACCOUNT: KV_ACCOUNT, KV_NS: KV_NS,
   normDay: normDay, earlierDay: earlierDay, dayNOf: dayNOf, titleOf: titleOf, chTxt: chTxt, HOU_CN: HOU_CN };
